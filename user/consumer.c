@@ -30,12 +30,16 @@ int main(void) {
 
     unsigned char msg[SLOT_SIZE];
     memset(msg, 0, SLOT_SIZE);
+    uint64_t expected = 0, received;
 
-    if (ring_pop(r, msg) != 0) {
-        perror("pop failed");
-        return 1;
+    while (1) {
+        while (ring_pop(r, msg) != 0);
+        memcpy(&received, msg, sizeof(received));
+        assert(received == expected);
+        expected++;
+        if (received >= N-1) break;
     }
 
-    printf("received: %s\n", msg);
+    printf("consumer last received: %lu\n", received);
     return 0;
 }

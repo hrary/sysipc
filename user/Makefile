@@ -1,9 +1,9 @@
-CFLAGS := -std=c11 -Wall -Wextra -O2
+CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -O2
 ifdef CAP
 CFLAGS += -DCAPACITY=$(CAP)
 endif
 
-BINS := smoketest producer consumer
+BINS := producer consumer
 
 all: $(BINS)
 

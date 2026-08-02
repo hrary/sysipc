@@ -42,13 +42,13 @@ int main(void) {
 
     unsigned char msg[SLOT_SIZE];
     memset(msg, 0, SLOT_SIZE);
-    snprintf((char *)msg, SLOT_SIZE, "hello from pid %d", getpid());
+    uint64_t i;
 
-    if (ring_push(r, msg) != 0) {
-        fprintf(stderr, "push failed\n");
-        return 1;
+    for (i = 0; i < N; i++) {
+        memcpy(msg, &i, sizeof(i));
+        while (ring_push(r, msg) != 0);
     }
 
-    printf("sent: %s\n", msg);
+    printf("producer last sent: %lu\n", i - 1);
     return 0;
 }

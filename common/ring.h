@@ -10,28 +10,33 @@
 #endif
 #define SLOT_SIZE 64
 #define MASK      (CAPACITY - 1)
+#define N		  10000000ULL
 
 struct ring {
-	uint32_t head;
-	uint32_t tail;
-	unsigned char slots[CAPACITY*SLOT_SIZE];
+	_Alignas(CACHELINE) _Atomic uint32_t head;
+	_Alignas(CACHELINE) _Atomic uint32_t tail;
+	_Alignas(CACHELINE) unsigned char slots[CAPACITY*SLOT_SIZE];
 };
 
 static inline void ring_init(struct ring *r) {
-	r->head=0;
-	r->tail=0;
+	atomic_init(&r->head, 0);
+	atomic_init(&r->tail, 0);
 }
 
 static inline int ring_push(struct ring *r, const void *msg) {
-	if (r->head - r->tail == CAPACITY) return -1;
-	memcpy(&r->slots[(r->head & MASK) * SLOT_SIZE], msg, SLOT_SIZE);
-	r->head++;
+	uint32_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
+	uint32_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
+	if (h - t == CAPACITY) return -1;
+	memcpy(&r->slots[(h & MASK) * SLOT_SIZE], msg, SLOT_SIZE);
+	atomic_store_explicit(&r->head, h + 1, memory_order_release);
 	return 0;
 }
 
 static inline int ring_pop(struct ring *r, void *out) {
-	if (r->head == r->tail) return -1;
-	memcpy(out, &r->slots[(r->tail & MASK) * SLOT_SIZE], SLOT_SIZE);
-	r->tail++;
+	uint32_t h = atomic_load_explicit(&r->head, memory_order_acquire);
+	uint32_t t = atomic_load_explicit(&r->tail, memory_order_relaxed);
+	if (h == t) return -1;
+	memcpy(out, &r->slots[(t & MASK) * SLOT_SIZE], SLOT_SIZE);
+	atomic_store_explicit(&r->tail, t + 1, memory_order_release);
 	return 0;
 }
