@@ -14,7 +14,7 @@
 struct ring {
 	uint32_t head;
 	uint32_t tail;
-	int data[CAPACITY];
+	unsigned char slots[CAPACITY*SLOT_SIZE];
 };
 
 static inline void ring_init(struct ring *r) {
@@ -24,14 +24,14 @@ static inline void ring_init(struct ring *r) {
 
 static inline int ring_push(struct ring *r, const void *msg) {
 	if (r->head - r->tail == CAPACITY) return -1;
-	r->data[r->head & MASK] = *(const int *)msg;
+	memcpy(&r->slots[(r->head & MASK) * SLOT_SIZE], msg, SLOT_SIZE);
 	r->head++;
 	return 0;
 }
 
 static inline int ring_pop(struct ring *r, void *out) {
 	if (r->head == r->tail) return -1;
-	*(int *)out = r->data[r->tail & MASK];
+	memcpy(out, &r->slots[(r->tail & MASK) * SLOT_SIZE], SLOT_SIZE);
 	r->tail++;
 	return 0;
 }
