@@ -3,7 +3,7 @@ ifdef CAP
 CFLAGS += -DCAPACITY=$(CAP)
 endif
 
-BINS := test producer consumer
+BINS := smoketest producer consumer
 
 all: $(BINS)
 
