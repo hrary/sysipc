@@ -1,0 +1,9 @@
+test
+producer
+consumer
+*.o
+*.ko
+*.mod*
+*.cmd
+Module.symvers
+modules.order
