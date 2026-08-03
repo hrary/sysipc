@@ -7,3 +7,4 @@ consumer
 *.cmd
 Module.symvers
 modules.order
+.vscode

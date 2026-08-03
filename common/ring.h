@@ -13,9 +13,20 @@
 #define N		  10000000ULL
 
 struct ring {
-	_Alignas(CACHELINE) _Atomic uint32_t head;
-	_Alignas(CACHELINE) _Atomic uint32_t tail;
-	_Alignas(CACHELINE) unsigned char slots[CAPACITY*SLOT_SIZE];
+	#ifndef NO_PADDING
+	_Alignas(CACHELINE) 
+	#endif
+	_Atomic uint32_t head;
+
+	#ifndef NO_PADDING
+	_Alignas(CACHELINE)
+	#endif
+	_Atomic uint32_t tail;
+
+	#ifndef NO_PADDING
+	_Alignas(CACHELINE)
+	#endif
+	unsigned char slots[CAPACITY*SLOT_SIZE];
 };
 
 static inline void ring_init(struct ring *r) {

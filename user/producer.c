@@ -18,7 +18,7 @@ int main(void) {
         perror("shm_open");
         return 1;
     } // error check
-
+    
     if (ftruncate(file_descriptor, sizeof(struct ring)) == -1) {
         perror("ftruncate");
         return 1;
