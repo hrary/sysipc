@@ -6,7 +6,7 @@ ifdef NO_PADDING
 CFLAGS += -DNO_PADDING
 endif
 
-BINS := producer consumer bench bench_sockets
+BINS := producer consumer bench bench_sockets ktest
 
 all: $(BINS)
 
