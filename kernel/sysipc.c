@@ -5,6 +5,15 @@
 #include <linux/device.h>      // class_create, device_create
 #include <linux/sched.h>       // current
 #include <linux/err.h>         // IS_ERR, PTR_ERR
+#include <linux/gfp.h>
+#include <linux/mm.h>
+
+#define BUF_ORDER  4            // 2^4 = 16 pages
+#define BUF_PAGES  (1 << BUF_ORDER)
+#define BUF_SIZE   (BUF_PAGES * PAGE_SIZE)
+
+static struct page *buf_pages; // page is a pre-defined kernel struct
+static void *buf_virt; // virtual address of the allocated buffer
 
 static int sysipc_open(struct inode *inode, struct file *filp)
 {
@@ -46,11 +55,25 @@ static int __init sysipc_init(void)
     if (ret < 0)
         return ret;
 
+    buf_pages = alloc_pages(GFP_KERNEL | __GFP_ZERO, BUF_ORDER); // allocate 16 contiguous pages of memory, zeroed
+    if (!buf_pages) {
+        return -ENOMEM;
+        goto err_region;
+    }
+
+    buf_virt = page_address(buf_pages); // get the virtual address of the allocated pages
+
+    /**
+     * struct page * = the descriptor of the memory; what the kernel uses to manage the memory
+     * page_address() result = the kernel virtual address of the allocated memory, which can be used to read/write to the memory
+     * buf_virt = the virtual address of the allocated buffer, what the process sees after mmap
+     */
+
     
     cdev_init(&sysipc_cdev, &sysipc_fops); // fills in the cdev struct and binds file operations
     ret = cdev_add(&sysipc_cdev, devno, 1); // adds the cdev to the kernel, making it live
     if (ret < 0)
-        goto err_region;
+        goto err_pages;
 
     // create a sysfs class and a device within it
     sysipc_class = class_create("sysipc");
@@ -65,16 +88,19 @@ static int __init sysipc_init(void)
     }
 
     pr_info("sysipc: loaded, major %d\n", MAJOR(devno));
+    pr_info("sysipc: allocated %lu bytes, page %p, virt %p\n", (unsigned long) BUF_SIZE, buf_pages, buf_virt);
     return 0;
 
-    // error handling: cleanup in reverse order of allocation if something above fails
-    err_class:
-        class_destroy(sysipc_class);
-    err_cdev:
-        cdev_del(&sysipc_cdev);
-    err_region:
-        unregister_chrdev_region(devno, 1);
-        return ret;
+// error handling: cleanup in reverse order of allocation if something above fails
+err_class:
+class_destroy(sysipc_class);
+err_cdev:
+    cdev_del(&sysipc_cdev);
+err_pages:
+    __free_pages(buf_pages, BUF_ORDER);
+err_region:
+    unregister_chrdev_region(devno, 1);
+    return ret;
 }
 
 // __exit discards when the code is built into the kernel, saving memory
@@ -84,6 +110,7 @@ static void __exit sysipc_exit(void)
     class_destroy(sysipc_class);
     cdev_del(&sysipc_cdev);
     unregister_chrdev_region(devno, 1);
+    __free_pages(buf_pages, BUF_ORDER);
     pr_info("sysipc: unloaded\n");
 }
 
