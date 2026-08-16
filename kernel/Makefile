@@ -1,7 +1,14 @@
 obj-m += sysipc.o
+KDIR := /lib/modules/$(shell uname -r)/build
 
 all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 clean:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+
+reload: all
+	-sudo rmmod sysipc
+	sudo insmod sysipc.ko
+
+.PHONY: all clean reload
