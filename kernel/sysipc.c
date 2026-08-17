@@ -7,11 +7,15 @@
 #include <linux/err.h>         // IS_ERR, PTR_ERR
 #include <linux/gfp.h>
 #include <linux/mm.h>
+#include <linux/wait.h>
+#include "../common/ring.h"
+#include <linux/poll.h>
 
 #define BUF_ORDER  6            // 2^6 = 64 pages
 #define BUF_PAGES  (1 << BUF_ORDER)
 #define BUF_SIZE   (BUF_PAGES * PAGE_SIZE)
 
+static DECLARE_WAIT_QUEUE_HEAD(sysipc_wq);
 static struct page *buf_pages; // page is a pre-defined kernel struct
 static void *buf_virt; // virtual address of the allocated buffer
 
@@ -63,12 +67,36 @@ static int sysipc_mmap(struct file *filp, struct vm_area_struct *vma)
     return 0;
 }
 
+static __poll_t sysipc_poll (struct file *filep, struct poll_table_struct *wait) {
+    struct ring *r = (struct ring *)buf_virt;
+    __poll_t mask = 0;
+    poll_wait(filep, &sysipc_wq, wait);
+
+    if (ring_readable(r)) mask |= EPOLLIN | EPOLLRDNORM;
+    if (ring_writeable(r)) mask |= EPOLLOUT | EPOLLWRNORM;
+
+    return mask;
+}
+
+static long sysipc_ioctl (struct file *filep, unsigned int cmd, unsigned long arg) {
+    switch (cmd) {
+        case SYSIPC_KICK:
+            wake_up_interruptible(&sysipc_wq);
+            return 0;
+        default:
+            return -ENOTTY;
+    }
+}
+
+
 // Define file operations for the sysipc device (vtable)
 static const struct file_operations sysipc_fops = {
     .owner   = THIS_MODULE,
     .open    = sysipc_open,
     .release = sysipc_release,
     .mmap = sysipc_mmap,
+    .poll = sysipc_poll,
+    .unlocked_ioctl = sysipc_ioctl,
 };
 
 static dev_t devno; // device number for the sysipc device

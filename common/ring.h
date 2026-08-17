@@ -1,8 +1,16 @@
 #pragma once
 
-#include <stdint.h>
-#include <stdatomic.h>
-#include <string.h>
+#ifdef __KERNEL__
+  #include <linux/types.h>
+  #include <linux/compiler.h>
+  #include <linux/string.h>
+  typedef u32 ring_idx_t;
+#else
+	#include <stdint.h>
+	#include <stdatomic.h>
+	#include <string.h>
+	typedef _Atomic uint32_t ring_idx_t;
+#endif
 
 #define CACHELINE 64
 #ifndef CAPACITY
@@ -11,24 +19,16 @@
 #define SLOT_SIZE 64
 #define MASK      (CAPACITY - 1)
 #define N		  10000000ULL
+#define SYSIPC_IOC_MAGIC 'S'
+#define SYSIPC_KICK      _IO(SYSIPC_IOC_MAGIC, 1)
 
 struct ring {
-	#ifndef NO_PADDING
-	_Alignas(CACHELINE) 
-	#endif
-	_Atomic uint32_t head;
-
-	#ifndef NO_PADDING
-	_Alignas(CACHELINE)
-	#endif
-	_Atomic uint32_t tail;
-
-	#ifndef NO_PADDING
-	_Alignas(CACHELINE)
-	#endif
-	unsigned char slots[CAPACITY*SLOT_SIZE];
+	_Alignas(CACHELINE) ring_idx_t head;
+    _Alignas(CACHELINE) ring_idx_t tail;
+    _Alignas(CACHELINE) unsigned char slots[CAPACITY * SLOT_SIZE];
 };
 
+#ifndef __KERNEL__
 static inline void ring_init(struct ring *r) {
 	atomic_init(&r->head, 0);
 	atomic_init(&r->tail, 0);
@@ -51,3 +51,22 @@ static inline int ring_pop(struct ring *r, void *out) {
 	atomic_store_explicit(&r->tail, t + 1, memory_order_release);
 	return 0;
 }
+#endif
+
+#ifdef __KERNEL__
+static inline int ring_readable(const struct ring *r) {
+	return READ_ONCE(r->head) != READ_ONCE(r->tail);
+}
+
+static inline int ring_writeable(const struct ring *r) {
+	return READ_ONCE(r->head) - READ_ONCE(r->tail) != CAPACITY;
+}
+#else
+static inline int ring_readable(const struct ring *r) {
+	return atomic_load_explicit(&r->head, memory_order_acquire) != atomic_load_explicit(&r->tail, memory_order_relaxed);
+}
+
+static inline int ring_writeable(const struct ring *r) {
+	return atomic_load_explicit(&r->head, memory_order_relaxed) - atomic_load_explicit(&r->tail, memory_order_acquire) != CAPACITY;
+}
+#endif

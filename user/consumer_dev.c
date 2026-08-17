@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
 
 int main(void) {
     struct ring* r;
@@ -26,20 +27,24 @@ int main(void) {
         return 1;
     }
 
-    close(fd);
-
     unsigned char msg[SLOT_SIZE];
     memset(msg, 0, SLOT_SIZE);
     uint64_t expected = 0, received;
 
     while (1) {
-        while (ring_pop(r, msg) != 0);
+         while (ring_pop(r, msg) != 0) {
+            struct pollfd pfd = {
+                .fd = fd,
+                .events = POLLIN,
+            };
+            poll(&pfd, 1, -1); // wait for data to be available in the ring buffer
+        }
         memcpy(&received, msg, sizeof(received));
         assert(received == expected);
         expected++;
         if (received >= N-1) break;
     }
-
+    close(fd);
     printf("consumer last received: %lu\n", received);
     return 0;
 }

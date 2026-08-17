@@ -43,6 +43,7 @@ int main(void) {
     for (i = 0; i < N; i++) {
         memcpy(msg, &i, sizeof(i));
         while (ring_push(r, msg) != 0);
+        ioctl(file_descriptor, SYSIPC_KICK); // notify the consumer that a new message is available
     }
 
     printf("producer last sent: %lu\n", i - 1);
