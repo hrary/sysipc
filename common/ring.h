@@ -21,11 +21,13 @@
 #define N		  10000000ULL
 #define SYSIPC_IOC_MAGIC 'S'
 #define SYSIPC_KICK      _IO(SYSIPC_IOC_MAGIC, 1)
+#define SPIN_LIMIT 1000
 
 struct ring {
 	_Alignas(CACHELINE) ring_idx_t head;
     _Alignas(CACHELINE) ring_idx_t tail;
     _Alignas(CACHELINE) unsigned char slots[CAPACITY * SLOT_SIZE];
+	_Alignas(CACHELINE) ring_idx_t consumer_waiting;
 };
 
 #ifndef __KERNEL__

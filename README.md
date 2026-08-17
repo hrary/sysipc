@@ -2,7 +2,8 @@
 
 A lock-free single-producer/single-consumer ring buffer for inter-process
 communication over shared memory, written in C11, with a Linux kernel module
-that serves the same mechanism through a character device.
+that serves the same mechanism through a character device and adds
+`poll`-based blocking.
 
 Two unrelated processes map the same physical pages and exchange fixed-size
 messages with no syscalls on the data path. Synchronization lives entirely
@@ -34,8 +35,7 @@ benchmark harness.
 ## Results
 
 4 vCPU Multipass VM (VirtualBox) on Windows, Ubuntu 24.04, gcc 13, `-O2`.
-64-byte payloads, 1024-slot ring, 10M messages. Medians over 20 runs;
-range in parentheses.
+64-byte payloads, 1024-slot ring, 10M messages. Medians over 20 runs.
 
 ### Throughput
 
@@ -59,7 +59,7 @@ range in parentheses.
 stack entirely, making it the fastest socket Linux offers. TCP loopback
 would flatter these numbers further.
 
-One-way latency is roughly half the round trip (~120 ns), against ~35 ns
+One-way latency is roughly half the round trip (~120 ns), against ~43 ns
 per message in streaming mode. The gap is pipelining: under continuous load
 the cross-core cache line transfer amortizes across in-flight messages,
 while ping-pong pays it in full on every exchange.
@@ -87,10 +87,11 @@ The tail ratios show the same split. The ring's p99 is 1.5x its p50 —
 cache-line transfer time is fairly deterministic. The socket's is 5.1x,
 because scheduler wakeup latency is not.
 
-The socket is slower but cheaper: it blocks at 0% CPU while waiting, where
-the ring burns a full core spinning. These figures measure latency and
-throughput only. On a busy machine, or with more endpoints than cores,
-spinning is often the wrong trade.
+An independent check on the syscall figure: the `poll` work below measured
+a single `ioctl` round trip at ~247 ns on the same machine. Doubling that
+for the socket's `write` + `read` gives ~494 ns, leaving ~124 ns for two
+64-byte copies and socket bookkeeping — consistent with the 618 ns measured
+here, from a separately written benchmark.
 
 ## The kernel module
 
@@ -125,8 +126,7 @@ path as tmpfs was — which is what makes the mechanism zero-syscall in the
 first place.
 
 What the kernel backend buys is not speed but capability surface: the
-validation above, and the ability to add `poll` and peer-death detection,
-neither of which a userspace shared-memory design can offer at any price.
+validation above, and blocking support, below.
 
 ### Finding: compound pages are not individually mappable
 
@@ -154,8 +154,100 @@ The first design populated pages lazily from a `.fault` handler. That hit
 fault handling, where page table locks are already held.
 
 Eager population from `.mmap` is the correct pairing. The cost is giving up
-demand paging, which is irrelevant at 128KB but would matter for a
+demand paging, which is irrelevant at 128 KB but would matter for a
 multi-gigabyte region; the fault-safe counterpart is `vmf_insert_page`.
+
+## Blocking without giving up the fast path
+
+A spinning consumer burns a full core while idle. Blocking requires the
+kernel, since only the kernel can put a process to sleep — but the kernel is
+deliberately absent from the data path, so it has no way to know a message
+arrived. Resolving that tension is the most interesting part of the project.
+
+The module holds a wait queue, implements `.poll`, and exposes a
+`SYSIPC_KICK` ioctl that wakes it. The consumer blocks in `poll()`; the
+producer calls the ioctl to signal.
+
+### Three implementations, measured
+
+| Mode | Mmsg/s | ns/msg | Idle CPU |
+|---|---|---|---|
+| spin only | 24.06 | 42 | ~100% |
+| poll, kick on every push | 3.46 | 289 | ~0.3% |
+| poll, conditional kick + adaptive spin | 17.3 | 58 | ~0.3% |
+
+The naive version reintroduces exactly what shared memory was meant to
+eliminate: one syscall per message. The 247 ns difference between rows one
+and two is a single `ioctl` round trip on this machine.
+
+### Making the kick conditional
+
+A `consumer_waiting` flag lives in the shared region, so the producer can
+check it with a plain load rather than a syscall. The consumer sets it
+before sleeping; the producer kicks only when it is set.
+
+Release/acquire is **not sufficient** here. The consumer stores `waiting`
+then loads `head`; the producer stores `head` then loads `waiting`. Each
+side stores one variable and loads another — the StoreLoad pattern, and the
+one reordering x86-TSO permits. Both sides can miss, leaving a message
+queued and the consumer asleep with no kick coming. Both sides therefore
+need a full `seq_cst` fence, and the consumer must re-check the ring after
+announcing itself and before sleeping.
+
+This is the same structure, and the same barrier requirement, as a futex.
+
+### The flag alone did not help
+
+Conditional kicking on its own reached only 4.24 Mmsg/s. The flag was
+working correctly; the problem was that the consumer genuinely *was* waiting
+almost every message. `ring_push` does more work than `ring_pop` — an extra
+payload copy, the fence, the flag load — so the producer is the slower side
+and the ring sits empty. The honest answer to "is the consumer waiting?" was
+yes, nearly always.
+
+The fix is to spin briefly before announcing, betting that data is about to
+arrive. Sweeping the spin limit (medians of 20 runs):
+
+| Spin limit | 10 | 50 | 100 | 500 | 1000 | 2000 | 5000 | 10000 |
+|---|---|---|---|---|---|---|---|---|
+| Mmsg/s | 6.37 | 14.50 | 17.06 | 17.30 | 16.70 | 17.91 | 17.11 | 17.20 |
+
+The knee is around 100 and everything above it is flat within the ~30%
+run-to-run spread. Under load the consumer finds data within roughly a
+hundred attempts, so a larger budget behaves like pure spinning; when no
+producer is running, the budget expires in microseconds and the process
+sleeps regardless. This is adaptive spinning, the same strategy used by
+Linux adaptive mutexes and the LMAX Disruptor's wait strategies.
+
+At a spin limit of 1000, an instrumented 10M-message run took 549 ms and
+issued **75,189 kicks — 0.75% of pushes**. Kicking every push would have
+spent 2.47 s in syscalls; this spent 18.6 ms, eliminating 99.2% of the
+syscall cost.
+
+### Where the remaining time goes
+
+Per-message cost at 549 ms / 10M = 54.9 ns:
+
+| Component | ns/msg |
+|---|---|
+| ring operations and flag load | ~31 |
+| `seq_cst` fence | ~24 |
+| kicks, amortized | ~1.9 |
+
+The fence figure comes from a control build with the flag load and ioctl
+retained and only the fence removed, which reached 32.4 Mmsg/s. That build
+is **incorrect** — it has the lost-wakeup race described above and completes
+only because of the 10 ms poll timeout — but it isolates the fence cleanly.
+
+So the correctness guarantee costs roughly 24 ns per message and is the
+single largest item in the fast path. There is no cheaper way to close the
+StoreLoad race with this design.
+
+One unexplained observation: that control build also outran pure spinning
+(32.4 vs 24.06). A plausible cause is cache-line contention — a tightly
+spinning consumer acquire-loads `head` continuously, forcing the line away
+from the producer on every attempt, whereas a sleeping consumer stops
+touching it. Untested.
 
 ## Finding: padding didn't help, and the reason is interesting
 
@@ -195,11 +287,17 @@ This is deliberately a minimal mechanism, not a complete IPC layer:
 
 - **Single producer, single consumer only.** Multiple writers would corrupt
   the indices; MPMC requires CAS-based reservation.
-- **Busy-waits.** Both sides spin on full/empty, burning a core. `poll`
-  support in the module is the intended fix and is not yet implemented.
-- **No peer-death detection.** If one side dies, the other spins forever.
-  The module's `.release` handler fires on process death, including abnormal
-  termination, which is the hook this would use.
+- **No peer-death detection.** If one side dies, the other blocks until its
+  poll timeout and then spins indefinitely. The module's `.release` handler
+  fires on process death, including abnormal termination, which is the hook
+  this would use.
+- **One wait queue for all rings.** A kick wakes every blocked reader
+  regardless of which ring received data. Correct, because waiters re-check
+  their own condition, but wasteful in ping-pong mode. A queue per direction
+  or per minor would fix it.
+- **A 10 ms poll timeout is retained as a backstop.** With the fences and
+  the re-check in place it should never fire; it is defence against a
+  signalling bug rather than part of the design.
 - **Device node is world-accessible.** `devnode` sets mode 0666 for
   development convenience, so any process on the system can map the buffer.
   A real driver would restrict by group or check capabilities in `.open`.
@@ -213,7 +311,8 @@ This is deliberately a minimal mechanism, not a complete IPC layer:
   is eliminating syscalls on the data path, not eliminating copies. A
   reserve/commit API would remove them.
 - **Measured on a VM.** Throughput varies ~30% run to run; treat
-  single-digit percentage differences as noise. Figures are medians.
+  single-digit percentage differences as noise. Figures are medians unless
+  stated otherwise.
 
 ## Build and run
 
@@ -236,7 +335,8 @@ Kernel backend:
     ls -l /dev/sysipc
 
     cd ../user
-    BIN=./bench_dev RUNS=20 ./run_bench.sh
+    BIN=./bench_dev  RUNS=20 ./run_bench.sh   # spinning
+    BIN=./bench_poll RUNS=20 ./run_bench.sh   # blocking
     ./producer_dev & ./consumer_dev
 
     sudo rmmod sysipc
@@ -251,9 +351,8 @@ Tested on Ubuntu 24.04, kernel 6.8. `vm_flags_set()` and the single-argument
 
 ## Next
 
-- `poll`/`epoll` support via a wait queue, so a consumer blocks when idle
-  instead of spinning — the capability that most clearly distinguishes the
-  kernel backend from the userspace one.
-- Peer-death detection through the `.release` handler.
+- Peer-death detection through the `.release` handler, removing the need for
+  the poll timeout backstop.
 - Cached peer indices, after which the cache-line padding above should
   produce a measurable gain.
+- A wait queue per ring, so a kick wakes only the relevant reader.

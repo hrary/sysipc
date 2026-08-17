@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 
 int main(void) {
     struct ring *r;
@@ -32,7 +33,6 @@ int main(void) {
         perror("mmap");
         return 1;
     }
-    close(file_descriptor); // close the file descriptor, we don't need it anymore
 
     ring_init(r);
 
@@ -43,8 +43,16 @@ int main(void) {
     for (i = 0; i < N; i++) {
         memcpy(msg, &i, sizeof(i));
         while (ring_push(r, msg) != 0);
-        ioctl(file_descriptor, SYSIPC_KICK); // notify the consumer that a new message is available
+        atomic_thread_fence(memory_order_seq_cst);
+        if (atomic_load_explicit(&r->consumer_waiting, memory_order_relaxed)) {
+            ioctl(file_descriptor, SYSIPC_KICK); // notify the consumer that a new message is available
+        }
     }
+    if (ioctl(file_descriptor, SYSIPC_KICK) == -1) {
+        perror("ioctl");
+        return 1;
+    }
+    close(file_descriptor); // close the file descriptor, we don't need it anymore
 
     printf("producer last sent: %lu\n", i - 1);
     return 0;
